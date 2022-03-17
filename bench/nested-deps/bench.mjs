@@ -15,12 +15,7 @@ import treeKill from 'tree-kill'
 const ROOT_DIR = join(fileURLToPath(import.meta.url), '..', '..', '..')
 const CWD = join(ROOT_DIR, 'bench', 'nested-deps')
 
-const NEXT_BIN = join(
-  ROOT_DIR,
-  'node_modules',
-  '.bin',
-  `next${process.platform === 'win32' ? '.cmd' : ''}`
-)
+const NEXT_BIN = join(ROOT_DIR, 'packages', 'next', 'dist', 'bin', 'next')
 
 const [, , command = 'all'] = process.argv
 

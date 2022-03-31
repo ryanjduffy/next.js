@@ -73,10 +73,17 @@ export default async function webdriver(
     process.env.BROWSER_NAME === 'internet explorer' ||
     process.env.SKIP_LOCAL_SELENIUM_SERVER
   ) {
+    console.log('>> Selenium')
     const browserMod = require('./browsers/selenium')
     CurrentInterface = browserMod.default
     browserQuit = browserMod.quit
+  } else if (process.env.RECORD_REPLAY) {
+    console.log('>> Replay')
+    const browserMod = require('./browsers/replay')
+    CurrentInterface = browserMod.default
+    browserQuit = browserMod.quit
   } else {
+    console.log('>> Playwright')
     const browserMod = require('./browsers/playwright')
     CurrentInterface = browserMod.default
     browserQuit = browserMod.quit

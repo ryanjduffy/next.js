@@ -50,14 +50,22 @@ class Playwright extends BrowserInterface {
     if (browser) return
     const headless = !!process.env.HEADLESS
 
-    if (browserName === 'safari') {
-      browser = await webkit.launch({ headless })
-    } else if (browserName === 'firefox') {
-      browser = await firefox.launch({ headless })
-    } else {
-      browser = await chromium.launch({ headless, devtools: !headless })
-    }
+    browser = await this.launchBrowser(browserName, { headless })
     context = await browser.newContext()
+  }
+
+  async launchBrowser(browserName: string, launchOptions: Record<string, any>) {
+    console.log(browserName, launchOptions)
+    if (browserName === 'safari') {
+      return await webkit.launch(launchOptions)
+    } else if (browserName === 'firefox') {
+      return await firefox.launch(launchOptions)
+    } else {
+      return await chromium.launch({
+        devtools: !launchOptions.headless,
+        ...launchOptions,
+      })
+    }
   }
 
   async get(url: string): Promise<void> {

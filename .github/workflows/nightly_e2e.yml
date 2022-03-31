@@ -1,0 +1,270 @@
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 5 * * *'
+
+name: Nightly E2E Tests
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+      # we build a dev binary for use in CI so skip downloading
+      # canary next-swc binaries in the monorepo
+      NEXT_SKIP_NATIVE_POSTINSTALL: 1
+    outputs:
+      docsChange: ${{ steps.docs-change.outputs.DOCS_CHANGE }}
+      isRelease: ${{ steps.check-release.outputs.IS_RELEASE }}
+      weekNum: ${{ steps.get-week.outputs.WEEK }}
+    steps:
+      - name: Setup node
+        uses: actions/setup-node@v2
+        if: ${{ steps.docs-change.outputs.docsChange != 'docs only change' }}
+        with:
+          node-version: 14
+
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 25
+
+      # https://github.com/actions/virtual-environments/issues/1187
+      - name: tune linux network
+        run: sudo ethtool -K eth0 tx off rx off
+
+      - run: yarn install --frozen-lockfile --check-files
+      - run: node run-tests.js --timings --write-timings -g 1/1
+      - run: node ./scripts/fetch-tags.mjs ${{ github.sha }}
+
+      - name: Check docs only change
+        run: echo ::set-output name=DOCS_CHANGE::$(node skip-docs-change.js echo 'not-docs-only-change')
+        id: docs-change
+
+      - run: echo ${{steps.docs-change.outputs.DOCS_CHANGE}}
+      - id: check-release
+        run: |
+          if [[ $(git describe --exact-match 2> /dev/null || :) = v* ]];
+            then
+              echo "::set-output name=IS_RELEASE::true"
+            else
+              echo "::set-output name=IS_RELEASE::false"
+          fi
+      # We use week in the turbo cache key to keep the cache from infinitely growing
+      - id: get-week
+        run: echo ::set-output name=WEEK::$(date +%U)
+
+      - uses: actions/cache@v2
+        id: cache-build
+        with:
+          path: ./*
+          key: ${{ github.sha }}-${{ github.run_number }}-${{ github.run_attempt }}
+
+  build-native-dev:
+    name: Build dev binary for tests
+    runs-on: ubuntu-18.04
+    steps:
+      # https://github.com/actions/virtual-environments/issues/1187
+      - name: tune linux network
+        run: sudo ethtool -K eth0 tx off rx off
+
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 25
+
+      - run: echo ::set-output name=DOCS_CHANGE::$(node skip-docs-change.js echo 'not-docs-only-change')
+        id: docs-change
+
+      - name: Setup node
+        uses: actions/setup-node@v2
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        with:
+          node-version: 16
+          check-latest: true
+
+      - name: Install
+        uses: actions-rs/toolchain@v1
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        with:
+          profile: minimal
+          toolchain: nightly-2022-02-23
+
+      - name: Cache cargo registry
+        uses: actions/cache@v2
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        with:
+          path: ~/.cargo/registry
+          key: stable-ubuntu-18.04-cargo-registry
+
+      - name: Cache cargo index
+        uses: actions/cache@v2
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        with:
+          path: ~/.cargo/git
+          key: stable-ubuntu-18.04-cargo-index
+
+      # We use week in the turbo cache key to keep the cache from infinitely growing
+      - id: get-week
+        run: echo ::set-output name=WEEK::$(date +%U)
+
+      - name: Turbo Cache
+        id: turbo-cache
+        uses: actions/cache@v2
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        with:
+          path: .turbo
+          key: turbo-${{ github.job }}-${{ github.ref_name }}-${{ steps.get-week.outputs.WEEK }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ github.job }}-
+            turbo-${{ github.job }}-${{ github.ref_name }}-${{ steps.get-week.outputs.WEEK }}-
+            turbo-${{ github.job }}-canary-${{ steps.get-week.outputs.WEEK }}-
+
+      # We use restore-key to pick latest cache.
+      # We will not get exact match, but doc says
+      # "If there are multiple partial matches for a restore key, the action returns the most recently created cache."
+      # So we get latest cache
+      - name: Cache built files
+        uses: actions/cache@v2
+        with:
+          path: ./packages/next-swc/target
+          key: next-swc-cargo-cache-dev-ubuntu-18.04-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            next-swc-cargo-cache-dev-ubuntu-18.04
+
+      # since the repo's dependencies aren't installed we need
+      # to install napi globally
+      - run: npm i -g @napi-rs/cli@2.4.4 turbo@1.0.28
+      - name: Build
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        run: turbo run build-native --cache-dir=".turbo"
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '10.13'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2.2.4
+        with:
+          name: next-swc-dev-binary
+          path: packages/next-swc/native/next-swc.linux-x64-gnu.node
+
+      - name: Clear the cargo caches
+        if: ${{ steps.docs-change.outputs.DOCS_CHANGE != 'docs only change' }}
+        run: |
+          cargo install cargo-cache --no-default-features --features ci-autoclean
+          cargo-cache
+
+  testDevE2E:
+    name: Test Development (E2E)
+    runs-on: ubuntu-latest
+    needs: [build, build-native-dev]
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+      NEXT_TEST_JOB: 1
+      BROWSER_NAME: 'firefox'
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [16, 17]
+    steps:
+      - name: Setup node
+        uses: actions/setup-node@v2
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: echo ${{needs.build.outputs.docsChange}}
+
+      # https://github.com/actions/virtual-environments/issues/1187
+      - name: tune linux network
+        run: sudo ethtool -K eth0 tx off rx off
+
+      - uses: actions/cache@v2
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+        id: restore-build
+        with:
+          path: ./*
+          key: ${{ github.sha }}-${{ github.run_number }}-${{ github.run_attempt }}
+
+      - uses: actions/download-artifact@v2
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+        with:
+          name: next-swc-dev-binary
+          path: packages/next-swc/native
+
+      - run: npm i -g playwright-chromium@1.14.1 && npx playwright install-deps
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+
+      - run: npx @replayio/playwright install all
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+
+      - run: RECORD_REPLAY=1 NEXT_TEST_MODE=dev node run-tests.js --type e2e
+        name: Run test/e2e (dev)
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+
+      - name: Upload test trace
+        if: always()
+        uses: actions/upload-artifact@v2
+        with:
+          name: test-trace
+          if-no-files-found: ignore
+          retention-days: 2
+          path: |
+            test/traces
+
+      - uses: replayio/action-upload@v0.1.1
+        if: always()
+        with:
+          apiKey: ${{ secrets.RECORD_REPLAY_API_KEY }}
+          public: true
+
+  testProdE2E:
+    name: Test Production (E2E)
+    runs-on: ubuntu-latest
+    needs: [build, build-native-dev]
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+      NEXT_TEST_JOB: 1
+      BROWSER_NAME: 'firefox'
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [16, 17]
+    steps:
+      - name: Setup node
+        uses: actions/setup-node@v2
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: echo ${{needs.build.outputs.docsChange}}
+
+      # https://github.com/actions/virtual-environments/issues/1187
+      - name: tune linux network
+        run: sudo ethtool -K eth0 tx off rx off
+
+      - uses: actions/cache@v2
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+        id: restore-build
+        with:
+          path: ./*
+          key: ${{ github.sha }}-${{ github.run_number }}-${{ github.run_attempt }}
+
+      - uses: actions/download-artifact@v2
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+        with:
+          name: next-swc-dev-binary
+          path: packages/next-swc/native
+
+      - run: npm i -g playwright-chromium@1.14.1 && npx playwright install-deps
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+
+      - run: npx @replayio/playwright install all
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+
+      - run: RECORD_REPLAY=1 NEXT_TEST_MODE=start node run-tests.js --type e2e
+        name: Run test/e2e (production)
+        if: ${{needs.build.outputs.docsChange != 'docs only change'}}
+
+      - uses: replayio/action-upload@v0.1.1
+        if: ${{ always() }}
+        with:
+          apiKey: ${{ secrets.RECORD_REPLAY_API_KEY }}
+          public: true

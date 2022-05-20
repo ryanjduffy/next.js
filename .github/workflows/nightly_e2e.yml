@@ -1,7 +1,7 @@
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 5 * * *'
+#   schedule:
+#     - cron: '30 5 * * *'
 
 name: Nightly E2E Tests
 
